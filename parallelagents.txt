@@ -1,0 +1,143 @@
+# Part of agent.py --> Follow https://google.github.io/adk-docs/get-started/quickstart/ to learn the setup
+
+import asyncio
+import os
+from google.adk.agents import LoopAgent, LlmAgent, BaseAgent, SequentialAgent, ParallelAgent
+from google.genai import types
+from google.adk.runners import InMemoryRunner
+from google.adk.agents.invocation_context import InvocationContext
+from google.adk.tools.tool_context import ToolContext
+from typing import AsyncGenerator, Optional
+from google.adk.events import Event, EventActions
+
+# --- Constants ---
+APP_NAME = "stock_analysis_app"
+USER_ID = "dev_user_01"
+SESSION_ID_BASE = "stock_analysis_session"
+GEMINI_MODEL = "gemini-2.0-flash"
+
+# --- Tool Definition (Assuming you have a search tool available) ---
+# You'll need to define your search tool here - this is a placeholder
+def google_search(tool_context: ToolContext, query: str):
+    """Search tool for getting stock information"""
+    # Implementation depends on your available search tool
+    # This is a placeholder - replace with your actual search implementation
+    pass
+
+# --- 1. Define Stock Analysis Sub-Agents (to run in parallel) ---
+
+# Analyst 1: Fundamental Analysis
+fundamental_analyst_agent = LlmAgent(
+    name="FundamentalAnalyst",
+    model=GEMINI_MODEL,
+    include_contents='default',  # Include user input to get stock symbol
+    instruction="""You are a Fundamental Analysis Expert specializing in stock valuation.
+
+The user will provide a stock symbol. For that stock, research and analyze:
+- Financial health (revenue, profit margins, debt levels)
+- Key financial ratios (P/E, P/B, ROE, etc.)
+- Company fundamentals (business model, competitive position)
+- Recent earnings and financial performance
+- Management quality and corporate governance
+
+Use the Google Search tool to gather recent financial data and company information.
+Focus on the fundamental value and long-term investment potential.
+
+Provide a concise fundamental analysis summary (3-4 sentences) covering the most important financial metrics and your assessment.
+Output *only* the analysis summary.
+""",
+    description="Performs fundamental analysis of stocks including financial metrics and company valuation.",
+    tools=[google_search],
+    output_key="fundamental_analysis_result"
+)
+
+# Analyst 2: Technical Analysis
+technical_analyst_agent = LlmAgent(
+    name="TechnicalAnalyst",
+    model=GEMINI_MODEL,
+    include_contents='default',  # Include user input to get stock symbol
+    instruction="""You are a Technical Analysis Expert specializing in stock price patterns and market trends.
+
+The user will provide a stock symbol. For that stock, research and analyze:
+- Current price trends and momentum
+- Key technical indicators (moving averages, RSI, MACD)
+- Chart patterns and support/resistance levels
+- Trading volume analysis
+- Short-term and medium-term price outlook
+
+Use the Google Search tool to gather recent price data, charts, and technical indicators.
+Focus on price action, trends, and trading signals.
+
+Provide a concise technical analysis summary (3-4 sentences) covering the most important technical signals and your price outlook.
+Output *only* the analysis summary. ra
+""",
+    description="Performs technical analysis of stocks including price patterns and trading indicators.",
+    tools=[google_search],
+    output_key="technical_analysis_result"
+)
+
+# --- 2. Create the ParallelAgent (Runs analysts concurrently) ---
+# This agent orchestrates the concurrent execution of both analysts.
+# It finishes once both analysts have completed and stored their results in state.
+parallel_analysis_agent = ParallelAgent(
+    name="ParallelStockAnalysisAgent",
+    sub_agents=[fundamental_analyst_agent, technical_analyst_agent],
+    description="Runs fundamental and technical analysis agents in parallel to analyze the stock."
+)
+
+# --- 3. Define the Synthesis Agent (Runs *after* the parallel agents) ---
+# This agent takes the results stored in the session state by the parallel agents
+# and synthesizes them into a comprehensive stock analysis report.
+synthesis_agent = LlmAgent(
+    name="StockAnalysisSynthesizer",
+    model=GEMINI_MODEL,
+    instruction="""You are a Senior Stock Analyst responsible for combining fundamental and technical analysis into a comprehensive investment report.
+
+Your task is to synthesize the following analysis results into a structured, actionable stock analysis report with clear investment recommendations.
+
+**Crucially: Your entire response MUST be grounded *exclusively* on the information provided in the 'Analysis Results' below. Do NOT add any external knowledge, facts, or details not present in these specific analyses.**
+
+**Analysis Results:**
+
+*   **Fundamental Analysis:**
+    {fundamental_analysis_result}
+
+*   **Technical Analysis:**
+    {technical_analysis_result}
+
+**Output Format:**
+
+## Stock Analysis Report
+
+### Fundamental Analysis Summary
+(Based on FundamentalAnalyst's findings)
+[Synthesize and elaborate *only* on the fundamental analysis provided above, focusing on financial health and valuation.]
+
+### Technical Analysis Summary
+(Based on TechnicalAnalyst's findings)
+[Synthesize and elaborate *only* on the technical analysis provided above, focusing on price trends and trading signals.]
+
+### Investment Recommendation
+[Provide a brief (2-3 sentence) investment recommendation that integrates *only* the fundamental and technical findings presented above. Include a suggested action: BUY, HOLD, or SELL with reasoning based solely on the provided analyses.]
+
+### Risk Assessment
+[Identify 1-2 key risks based *only* on the information provided in the analyses above.]
+
+Output *only* the structured report following this format. Do not include introductory or concluding phrases outside this structure, and strictly adhere to using only the provided analysis content.
+""",
+    description="Combines fundamental and technical analysis findings into a comprehensive stock analysis report with investment recommendations.",
+    # No tools needed for synthesis
+    # No output_key needed here, as its direct response is the final output of the sequence
+)
+
+# --- 4. Create the SequentialAgent (Orchestrates the overall flow) ---
+# This is the main agent that will be run. It first executes the ParallelAgent
+# to populate the state, and then executes the SynthesisAgent to produce the final output.
+sequential_stock_analysis_agent = SequentialAgent(
+    name="StockAnalysisAndSynthesisPipeline",
+    # Run parallel analysis first, then synthesize
+    sub_agents=[parallel_analysis_agent, synthesis_agent],
+    description="Coordinates parallel fundamental and technical analysis and synthesizes the results into an investment report."
+)
+
+root_agent = sequential_stock_analysis_agent
